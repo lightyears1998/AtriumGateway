@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="src/AtriumGateway/AtriumGateway.csproj" />
+  <Project Path="src/AtriumGateway.Core/AtriumGateway.Core.csproj" />
+  <Project Path="tests/AtriumGateway.Core.Tests/AtriumGateway.Core.Tests.csproj" />
+</Solution>
