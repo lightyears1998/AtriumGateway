@@ -24,11 +24,21 @@ public sealed class ResponseObserverFactory : IResponseObserverFactory
     }
 
     private static bool IsCompressed(ResponseObservationContext context)
-        => throw new NotImplementedException(); // TODO：依据 Content-Encoding 判断
+        => !string.IsNullOrEmpty(context.ContentEncoding)
+            && !string.Equals(context.ContentEncoding, "identity", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsServerSentEvents(ResponseObservationContext context)
-        => throw new NotImplementedException(); // TODO：依据 Content-Type 判断
+        => context.ContentType is not null
+            && context.ContentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsJson(ResponseObservationContext context)
-        => throw new NotImplementedException(); // TODO：依据 Content-Type 判断
+    {
+        if (context.ContentType is null)
+        {
+            return false;
+        }
+
+        return context.ContentType.Contains("application/json", StringComparison.OrdinalIgnoreCase)
+            || context.ContentType.Contains("+json", StringComparison.OrdinalIgnoreCase);
+    }
 }

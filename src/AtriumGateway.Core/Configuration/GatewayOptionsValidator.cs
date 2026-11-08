@@ -25,11 +25,38 @@ public static class GatewayOptionsValidator
         return new ConfigurationValidationResult(issues);
     }
 
-    // 账号：非空；Id 与 Key 非空且互不重复。
     private static void CollectAccountIssues(GatewayOptions options, List<ConfigurationIssue> issues)
-        => throw new NotImplementedException(); // TODO
+    {
+        if (options.Accounts.Count == 0)
+        {
+            issues.Add(new ConfigurationIssue("account.empty", "未配置任何账号"));
+            return;
+        }
 
-    // 上游：非空；Id 非空且互不重复；BaseAddress 须能规范化为绝对 http/https 地址。
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        foreach (AccountSettings account in options.Accounts)
+        {
+            if (string.IsNullOrWhiteSpace(account.Id))
+            {
+                issues.Add(new ConfigurationIssue("account.id.empty", "账号标识为空"));
+            }
+            else if (!ids.Add(account.Id))
+            {
+                issues.Add(new ConfigurationIssue("account.id.duplicated", $"账号标识重复：{account.Id}"));
+            }
+
+            if (string.IsNullOrEmpty(account.Key))
+            {
+                issues.Add(new ConfigurationIssue("account.key.empty", $"账号 {account.Id} 的密钥为空"));
+            }
+            else if (!keys.Add(account.Key))
+            {
+                issues.Add(new ConfigurationIssue("account.key.duplicated", $"账号 {account.Id} 的密钥与其他账号重复"));
+            }
+        }
+    }
+
     private static void CollectUpstreamIssues(GatewayOptions options, List<ConfigurationIssue> issues)
     {
         if (options.Upstreams.Count == 0)
@@ -38,8 +65,23 @@ public static class GatewayOptionsValidator
             return;
         }
 
+        HashSet<string> ids = new(StringComparer.Ordinal);
         foreach (UpstreamSettings upstream in options.Upstreams)
         {
+            if (string.IsNullOrWhiteSpace(upstream.Id))
+            {
+                issues.Add(new ConfigurationIssue("upstream.id.empty", "上游标识为空"));
+            }
+            else if (!ids.Add(upstream.Id))
+            {
+                issues.Add(new ConfigurationIssue("upstream.id.duplicated", $"上游标识重复：{upstream.Id}"));
+            }
+
+            if (string.IsNullOrEmpty(upstream.ApiKey))
+            {
+                issues.Add(new ConfigurationIssue("upstream.apiKey.empty", $"上游 {upstream.Id} 的密钥为空"));
+            }
+
             if (!UpstreamAddress.TryNormalize(upstream.BaseAddress, out _, out string? error))
             {
                 issues.Add(new ConfigurationIssue("upstream.baseAddress", error ?? "上游地址非法"));
@@ -47,7 +89,21 @@ public static class GatewayOptionsValidator
         }
     }
 
-    // 数值参数：空闲超时与冷却期为正值，请求体缓冲上限为正值。
     private static void CollectLimitIssues(GatewayOptions options, List<ConfigurationIssue> issues)
-        => throw new NotImplementedException(); // TODO
+    {
+        if (options.UpstreamActivityTimeout <= TimeSpan.Zero)
+        {
+            issues.Add(new ConfigurationIssue("limit.activityTimeout", "上游空闲超时须为正值"));
+        }
+
+        if (options.UpstreamCooldown <= TimeSpan.Zero)
+        {
+            issues.Add(new ConfigurationIssue("limit.cooldown", "上游冷却期须为正值"));
+        }
+
+        if (options.RequestBodyBufferLimit <= 0)
+        {
+            issues.Add(new ConfigurationIssue("limit.requestBodyBuffer", "请求体缓冲上限须为正值"));
+        }
+    }
 }

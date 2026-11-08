@@ -1,3 +1,4 @@
+using System.Globalization;
 using AtriumGateway.Core.Configuration;
 using AtriumGateway.Core.Upstream;
 using Microsoft.Extensions.Configuration;
@@ -23,7 +24,7 @@ public static class GatewayOptionsLoader
         GatewayOptions options = new()
         {
             Accounts = ReadAccountList(configuration, AccountsKey),
-            Upstreams = ReadUpstreamList(configuration, UpstreamsKey),
+            Upstreams = NormalizeUpstreams(ReadUpstreamList(configuration, UpstreamsKey)),
             UserAgent = ReadOptionalString(configuration, UserAgentKey),
             UpstreamActivityTimeout = ReadTimeSpan(configuration, UpstreamActivityTimeoutKey, TimeSpan.FromMinutes(10)),
             UpstreamCooldown = ReadTimeSpan(configuration, UpstreamCooldownKey, TimeSpan.FromMinutes(5)),
@@ -36,20 +37,86 @@ public static class GatewayOptionsLoader
     }
 
     private static IReadOnlyList<AccountSettings> ReadAccountList(IConfiguration configuration, string key)
-        => throw new NotImplementedException(); // TODO：读取 Gateway:Accounts:{i}:{Id,Key}，保持配置顺序
+    {
+        List<AccountSettings> accounts = new();
+        foreach (IConfigurationSection section in configuration.GetSection(key).GetChildren())
+        {
+            accounts.Add(new AccountSettings(
+                section["Id"] ?? string.Empty,
+                section["Key"] ?? string.Empty));
+        }
+
+        return accounts;
+    }
 
     private static IReadOnlyList<UpstreamSettings> ReadUpstreamList(IConfiguration configuration, string key)
-        => throw new NotImplementedException(); // TODO：读取 Gateway:Upstreams:{i}:{Id,BaseAddress,ApiKey}，顺序即固定优先级
+    {
+        List<UpstreamSettings> upstreams = new();
+        foreach (IConfigurationSection section in configuration.GetSection(key).GetChildren())
+        {
+            upstreams.Add(new UpstreamSettings(
+                section["Id"] ?? string.Empty,
+                section["BaseAddress"] ?? string.Empty,
+                section["ApiKey"] ?? string.Empty));
+        }
+
+        return upstreams;
+    }
+
+    private static IReadOnlyList<UpstreamSettings> NormalizeUpstreams(IReadOnlyList<UpstreamSettings> upstreams)
+    {
+        List<UpstreamSettings> normalized = new(upstreams.Count);
+        foreach (UpstreamSettings upstream in upstreams)
+        {
+            normalized.Add(UpstreamAddress.TryNormalize(upstream.BaseAddress, out string? address, out _)
+                && address is not null
+                    ? upstream with { BaseAddress = address }
+                    : upstream);
+        }
+
+        return normalized;
+    }
 
     private static string? ReadOptionalString(IConfiguration configuration, string key)
-        => throw new NotImplementedException(); // TODO
+    {
+        string? value = configuration[key];
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
 
     private static TimeSpan ReadTimeSpan(IConfiguration configuration, string key, TimeSpan defaultValue)
-        => throw new NotImplementedException(); // TODO：缺失回退默认值，非法则抛配置异常
+    {
+        string? value = configuration[key];
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return defaultValue;
+        }
+
+        return TimeSpan.TryParse(value, CultureInfo.InvariantCulture, out TimeSpan parsed)
+            ? parsed
+            : throw new InvalidOperationException($"配置项 {key} 不是合法的时间间隔。");
+    }
 
     private static long ReadLong(IConfiguration configuration, string key, long defaultValue)
-        => throw new NotImplementedException(); // TODO
+    {
+        string? value = configuration[key];
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return defaultValue;
+        }
+
+        return long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed)
+            ? parsed
+            : throw new InvalidOperationException($"配置项 {key} 不是合法的整数。");
+    }
 
     private static void ThrowIfInvalid(ConfigurationValidationResult validation)
-        => throw new NotImplementedException(); // TODO：汇总问题快速失败；只说明缺哪个键，不回显取值
+    {
+        if (validation.IsValid)
+        {
+            return;
+        }
+
+        string codes = string.Join(", ", validation.Issues.Select(issue => issue.Code));
+        throw new InvalidOperationException($"配置校验失败：{codes}。");
+    }
 }

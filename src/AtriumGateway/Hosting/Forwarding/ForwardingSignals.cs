@@ -14,17 +14,27 @@ public static class ForwardingSignals
 
     /// <summary>标记本次尝试需要换发，并携带触发原因（上游状态码与错误码）。</summary>
     public static void SetSwitchNext(HttpContext context, UpstreamSwitchReason reason)
-        => throw new NotImplementedException(); // TODO：context.Items[SwitchNextKey] = reason
+        => context.Items[SwitchNextKey] = reason;
 
     /// <summary>读取并清除换发信号；未设置时返回 false，<paramref name="reason"/> 为 null。</summary>
     public static bool TryConsumeSwitchNext(HttpContext context, out UpstreamSwitchReason? reason)
-        => throw new NotImplementedException(); // TODO：读取后从 Items 移除
+    {
+        if (context.Items.TryGetValue(SwitchNextKey, out object? value) && value is UpstreamSwitchReason switchReason)
+        {
+            context.Items.Remove(SwitchNextKey);
+            reason = switchReason;
+            return true;
+        }
+
+        reason = null;
+        return false;
+    }
 
     /// <summary>记录本次请求的请求体是否可重放，供响应侧判定能否换发。</summary>
     public static void SetRequestBodyReplayable(HttpContext context, bool replayable)
-        => throw new NotImplementedException(); // TODO：context.Items[RequestBodyReplayableKey] = replayable
+        => context.Items[RequestBodyReplayableKey] = replayable;
 
     /// <summary>请求体是否可重放（空体或已在上限内缓冲）；未设置时视为不可重放。</summary>
     public static bool IsRequestBodyReplayable(HttpContext context)
-        => throw new NotImplementedException(); // TODO：读取 Items[RequestBodyReplayableKey]，缺失返回 false
+        => context.Items.TryGetValue(RequestBodyReplayableKey, out object? value) && value is true;
 }

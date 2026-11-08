@@ -48,8 +48,26 @@ internal sealed class ResponseTeeStream : Stream
     public override void SetLength(long value) => throw new NotSupportedException();
 
     private void WriteAndObserve(ReadOnlySpan<byte> buffer)
-        => throw new NotImplementedException(); // TODO：_observer.Observe(buffer) 后 _inner.Write(buffer)
+    {
+        ObserveQuietly(buffer);
+        _inner.Write(buffer);
+    }
 
     private ValueTask WriteAndObserveAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
-        => throw new NotImplementedException(); // TODO：_observer.Observe 后 _inner.WriteAsync（下游按块 flush）
+    {
+        ObserveQuietly(buffer.Span);
+        return _inner.WriteAsync(buffer, cancellationToken);
+    }
+
+    private void ObserveQuietly(ReadOnlySpan<byte> buffer)
+    {
+        try
+        {
+            _observer.Observe(buffer);
+        }
+        catch (Exception)
+        {
+            // 观察失败不得影响转发。
+        }
+    }
 }

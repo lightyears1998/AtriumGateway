@@ -62,5 +62,17 @@ public interface IRequestLogSink
 public static class RequestOutcomeClassifier
 {
     public static RequestOutcome Classify(int statusCode, bool clientDisconnected, bool gatewayError)
-        => throw new NotImplementedException(); // TODO：客户端断开优先，其次网关失败，再按 2xx/4xx/5xx 区分上游错误
+    {
+        if (clientDisconnected)
+        {
+            return RequestOutcome.ClientDisconnected;
+        }
+
+        if (gatewayError)
+        {
+            return RequestOutcome.GatewayError;
+        }
+
+        return statusCode is >= 200 and < 300 ? RequestOutcome.Succeeded : RequestOutcome.UpstreamError;
+    }
 }

@@ -24,8 +24,9 @@ internal sealed class ResponseTeeFeature : IHttpResponseBodyFeature
 
     public Task StartAsync(CancellationToken cancellationToken) => _inner.StartAsync(cancellationToken);
 
+    /// <summary>不提供绕过观察的文件发送路径。</summary>
     public Task SendFileAsync(string path, long offset, long? count, CancellationToken cancellationToken)
-        => throw new NotImplementedException(); // TODO：YARP 不使用 SendFile；不得提供绕过 tee 的路径
+        => throw new NotSupportedException("响应体经由观察流写入，不支持文件直发。");
 
     public Task CompleteAsync() => _inner.CompleteAsync();
 

@@ -7,12 +7,19 @@ public static class UserAgentComposer
 
     /// <summary>配置值优先；否则生成 <c>Atrium-Gateway/{version}</c>。</summary>
     public static string Compose(string? configured, Version gatewayVersion)
-        => throw new NotImplementedException(); // TODO
+    {
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return configured.Trim();
+        }
 
-    /// <summary>
-    /// 读取网关自身程序集版本。
-    /// 未设置版本号时回退 0.0.0。
-    /// </summary>
+        return $"{DefaultProductName}/{FormatVersion(gatewayVersion)}";
+    }
+
+    /// <summary>读取网关自身程序集版本；未设置版本号时回退 0.0.0。</summary>
     public static Version ReadGatewayVersion()
         => typeof(UserAgentComposer).Assembly.GetName().Version ?? new Version(0, 0, 0);
+
+    private static string FormatVersion(Version version)
+        => version.Build >= 0 ? version.ToString(3) : version.ToString(2);
 }

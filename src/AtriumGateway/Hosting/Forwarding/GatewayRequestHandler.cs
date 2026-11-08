@@ -25,6 +25,8 @@ public enum ForwardAttemptResult
 /// <summary>终端处理器：鉴权 → 请求体可重放缓冲 → 固定顺序换发循环 → 只读观测与元数据日志。</summary>
 public sealed class GatewayRequestHandler
 {
+    private const string BearerPrefix = "Bearer ";
+
     private readonly IHttpForwarder _forwarder;
     private readonly IAccountAuthenticator _authenticator;
     private readonly IUpstreamSelector _upstreamSelector;
@@ -63,19 +65,29 @@ public sealed class GatewayRequestHandler
     public async Task HandleAsync(HttpContext context)
     {
         DateTimeOffset startedAt = DateTimeOffset.UtcNow;
-
         string? bearerToken = ExtractBearerToken(context);
+
         if (!_authenticator.TryAuthenticate(bearerToken, out AuthenticatedAccount? account))
         {
             await _errorWriter.WriteAsync(context, GatewayErrorKind.Unauthorized, context.RequestAborted);
+            await TryWriteLogAsync(
+                context,
+                accountId: null,
+                upstreamId: null,
+                outcome: RequestOutcome.GatewayError,
+                error: ForwarderError.None,
+                usage: UsageSnapshot.Unknown,
+                attemptedUpstreams: Array.Empty<string>(),
+                switchReasons: Array.Empty<UpstreamSwitchReason>(),
+                startedAt);
             return;
         }
 
-        using RequestBodyBuffer bodyBuffer = _bodyBufferFactory.Create(context);
+        using RequestBodyBuffer bodyBuffer = await _bodyBufferFactory.CreateAsync(context, context.RequestAborted);
         ForwardingSignals.SetRequestBodyReplayable(context, bodyBuffer.IsReplayable);
 
-        List<string> attemptedUpstreams = [];
-        List<UpstreamSwitchReason> switchReasons = [];
+        List<string> attemptedUpstreams = new();
+        List<UpstreamSwitchReason> switchReasons = new();
 
         while (true)
         {
@@ -89,15 +101,25 @@ public sealed class GatewayRequestHandler
             bodyBuffer.Rewind();
 
             ForwardAttemptResult attempt = await ForwardOnceAsync(
-                context, upstream, account, startedAt, attemptedUpstreams, switchReasons);
+                context, upstream, account, attemptedUpstreams, switchReasons, startedAt);
 
-            if (attempt == ForwardAttemptResult.Completed)
+            if (attempt != ForwardAttemptResult.SwitchNext)
             {
                 return;
             }
         }
 
         await _errorWriter.WriteAsync(context, GatewayErrorKind.NoUpstreamAvailable, context.RequestAborted);
+        await WriteLogAsync(
+            context,
+            account.Id,
+            attemptedUpstreams.Count > 0 ? attemptedUpstreams[^1] : null,
+            outcome: RequestOutcome.GatewayError,
+            error: ForwarderError.None,
+            usage: UsageSnapshot.Unknown,
+            attemptedUpstreams,
+            switchReasons,
+            startedAt);
     }
 
     // 单次上游尝试：观测 → 转发 → 换发信号判定或收尾记录。
@@ -105,9 +127,9 @@ public sealed class GatewayRequestHandler
         HttpContext context,
         UpstreamEndpoint upstream,
         AuthenticatedAccount account,
-        DateTimeOffset startedAt,
         List<string> attemptedUpstreams,
-        List<UpstreamSwitchReason> switchReasons)
+        List<UpstreamSwitchReason> switchReasons,
+        DateTimeOffset startedAt)
     {
         HttpTransformer transformer = _pipelineFactory.CreateTransformer(upstream, _shared);
         using ResponseObservationScope observation = ResponseObservationScope.Begin(context, _observerFactory);
@@ -131,27 +153,72 @@ public sealed class GatewayRequestHandler
             return ForwardAttemptResult.SwitchNext;
         }
 
+        _upstreamSelector.Report(upstream, UpstreamOutcome.PassThrough, DateTimeOffset.UtcNow);
         UsageSnapshot usage = observation.Complete();
-        GatewayRequestLog entry = CreateRequestLog(
-            context, upstream, account, error, usage, startedAt, attemptedUpstreams, switchReasons);
-        await _logSink.WriteAsync(entry, CancellationToken.None);
-        ApplyForwarderError(context, error);
+        bool clientDisconnected = context.RequestAborted.IsCancellationRequested || IsClientCancellation(error);
+        bool gatewayError = error != ForwarderError.None && !clientDisconnected;
+        RequestOutcome outcome = RequestOutcomeClassifier.Classify(
+            context.Response.StatusCode, clientDisconnected, gatewayError);
+
+        await WriteLogAsync(
+            context, account.Id, upstream.Id, outcome, error, usage, attemptedUpstreams, switchReasons, startedAt);
+
         return ForwardAttemptResult.Completed;
     }
 
-    // 组装元数据日志：换发路径与失败说明在此处汇入；失败说明写入前必须脱敏。
-    private GatewayRequestLog CreateRequestLog(
+    // 日志失败必须隔离降级，不得影响转发结果。
+    private async Task TryWriteLogAsync(
         HttpContext context,
-        UpstreamEndpoint upstream,
-        AuthenticatedAccount account,
+        string? accountId,
+        string? upstreamId,
+        RequestOutcome outcome,
         ForwarderError error,
         UsageSnapshot usage,
-        DateTimeOffset startedAt,
-        List<string> attemptedUpstreams,
-        List<UpstreamSwitchReason> switchReasons)
+        IReadOnlyList<string> attemptedUpstreams,
+        IReadOnlyList<UpstreamSwitchReason> switchReasons,
+        DateTimeOffset startedAt)
     {
-        bool clientDisconnected = context.RequestAborted.IsCancellationRequested;
-        bool gatewayError = error != ForwarderError.None;
+        try
+        {
+            await WriteLogAsync(
+                context, accountId, upstreamId, outcome, error, usage, attemptedUpstreams, switchReasons, startedAt);
+        }
+        catch (Exception)
+        {
+            // 日志失败不影响已完成的转发。
+        }
+    }
+
+    private async Task WriteLogAsync(
+        HttpContext context,
+        string? accountId,
+        string? upstreamId,
+        RequestOutcome outcome,
+        ForwarderError error,
+        UsageSnapshot usage,
+        IReadOnlyList<string> attemptedUpstreams,
+        IReadOnlyList<UpstreamSwitchReason> switchReasons,
+        DateTimeOffset startedAt)
+    {
+        GatewayRequestLog entry = CreateRequestLog(
+            context, accountId, upstreamId, outcome, error, usage, attemptedUpstreams, switchReasons, startedAt);
+        await _logSink.WriteAsync(entry, CancellationToken.None);
+    }
+
+    private GatewayRequestLog CreateRequestLog(
+        HttpContext context,
+        string? accountId,
+        string? upstreamId,
+        RequestOutcome outcome,
+        ForwarderError error,
+        UsageSnapshot usage,
+        IReadOnlyList<string> attemptedUpstreams,
+        IReadOnlyList<UpstreamSwitchReason> switchReasons,
+        DateTimeOffset startedAt)
+    {
+        string? contentType = context.Response.ContentType;
+        bool isStreaming = contentType is not null
+            && contentType.Contains("text/event-stream", StringComparison.OrdinalIgnoreCase);
 
         return new GatewayRequestLog
         {
@@ -161,14 +228,53 @@ public sealed class GatewayRequestHandler
             PathAndQuery = $"{context.Request.Path}{context.Request.QueryString}",
             StatusCode = context.Response.StatusCode,
             Elapsed = DateTimeOffset.UtcNow - startedAt,
-            AccountId = account.Id,
-            UpstreamId = upstream.Id,
+            AccountId = accountId,
+            UpstreamId = upstreamId,
             AttemptedUpstreams = attemptedUpstreams.ToArray(),
             SwitchReasons = switchReasons.ToArray(),
             Usage = usage,
-            Outcome = RequestOutcomeClassifier.Classify(context.Response.StatusCode, clientDisconnected, gatewayError),
+            IsStreaming = isStreaming,
+            Outcome = outcome,
             FailureDetail = SecretRedactor.Redact(DescribeForwarderError(context, error), _secrets),
         };
+    }
+
+    private static bool IsClientCancellation(ForwarderError error)
+        => error is ForwarderError.RequestCanceled
+            or ForwarderError.RequestBodyCanceled
+            or ForwarderError.ResponseBodyCanceled
+            or ForwarderError.UpgradeRequestCanceled
+            or ForwarderError.UpgradeResponseCanceled;
+
+    private static string? ExtractBearerToken(HttpContext context)
+    {
+        string header = context.Request.Headers["Authorization"].ToString();
+        if (string.IsNullOrEmpty(header))
+        {
+            return null;
+        }
+
+        if (!header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        string token = header[BearerPrefix.Length..].Trim();
+        return token.Length == 0 ? null : token;
+    }
+
+    private static string? DescribeForwarderError(HttpContext context, ForwarderError error)
+    {
+        if (error == ForwarderError.None)
+        {
+            return null;
+        }
+
+        IForwarderErrorFeature? feature = context.Features.Get<IForwarderErrorFeature>();
+        Exception? exception = feature?.Exception;
+        return exception is null
+            ? error.ToString()
+            : $"{error}: {exception.GetType().Name}: {exception.Message}";
     }
 
     private static string[] CollectSecrets(GatewayOptions options)
@@ -186,13 +292,4 @@ public sealed class GatewayRequestHandler
 
         return secrets.ToArray();
     }
-
-    private static string? ExtractBearerToken(HttpContext context)
-        => throw new NotImplementedException(); // TODO：读取 Authorization 头并去掉 "Bearer " 前缀；缺失返回 null
-
-    private static string? DescribeForwarderError(HttpContext context, ForwarderError error)
-        => throw new NotImplementedException(); // TODO：由转发错误特性取异常消息，无异常时按错误枚举给出简短说明
-
-    private static void ApplyForwarderError(HttpContext context, ForwarderError error)
-        => throw new NotImplementedException(); // TODO：未开始响应时 502/504；已开始则确保中断
 }

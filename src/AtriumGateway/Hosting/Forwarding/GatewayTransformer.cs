@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using AtriumGateway.Core.Upstream;
 using Microsoft.AspNetCore.Http;
 using Yarp.ReverseProxy.Forwarder;
@@ -12,6 +13,8 @@ namespace AtriumGateway.Hosting.Forwarding;
 /// </summary>
 internal sealed class GatewayTransformer : HttpTransformer
 {
+    private const int MaxErrorBodyBytes = 64 * 1024;
+
     private readonly string _upstreamApiKey;
     private readonly string _userAgent;
 
@@ -41,57 +44,88 @@ internal sealed class GatewayTransformer : HttpTransformer
         HttpResponseMessage? proxyResponse,
         CancellationToken cancellationToken)
     {
-        if (proxyResponse is not null && RequiresInspection(proxyResponse))
+        if (proxyResponse is null || !RequiresInspection(proxyResponse))
         {
-            return await InspectAndHandleAsync(httpContext, proxyResponse, cancellationToken);
+            return await base.TransformResponseAsync(httpContext, proxyResponse, cancellationToken);
         }
 
-        return await base.TransformResponseAsync(httpContext, proxyResponse, cancellationToken);
+        Stream errorStream = await proxyResponse.Content.ReadAsStreamAsync(cancellationToken);
+        try
+        {
+            (byte[] prefix, bool complete, string? errorCode) = await ReadPrefixAsync(errorStream, cancellationToken);
+            UpstreamFailureClass failureClass = UpstreamErrorClassifier.Classify(
+                (int)proxyResponse.StatusCode,
+                complete ? errorCode : null);
+
+            await base.TransformResponseAsync(httpContext, proxyResponse, cancellationToken);
+
+            if (failureClass == UpstreamFailureClass.ExplicitFailure && ForwardingSignals.IsRequestBodyReplayable(httpContext))
+            {
+                httpContext.Response.Clear();
+                ForwardingSignals.SetSwitchNext(httpContext, new UpstreamSwitchReason((int)proxyResponse.StatusCode, errorCode));
+                return false;
+            }
+
+            await WriteBodyAsync(httpContext, errorStream, prefix, complete, cancellationToken);
+            return false;
+        }
+        finally
+        {
+            await errorStream.DisposeAsync();
+        }
     }
 
     private static bool RequiresInspection(HttpResponseMessage response)
-        => throw new NotImplementedException(); // TODO：状态码为 401 或 429（统一走读体路径以保留原样透传能力）
+        => (int)response.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status429TooManyRequests;
 
-    // 只读提取 error.code → 分类 → 基类复制状态码与响应头 → 明确错误且请求体可重放则清空响应并置入换发信号
-    //（此时尚无字节写出）→ 否则把已读字节原样写回。
-    private async ValueTask<bool> InspectAndHandleAsync(
-        HttpContext context,
-        HttpResponseMessage response,
+    private static async ValueTask<(byte[] Prefix, bool Complete, string? ErrorCode)> ReadPrefixAsync(
+        Stream source,
         CancellationToken cancellationToken)
     {
-        (ReadOnlyMemory<byte> errorBody, string? errorCode) = await ReadErrorBodyAsync(response, cancellationToken);
-        UpstreamFailureClass failureClass = UpstreamErrorClassifier.Classify((int)response.StatusCode, errorCode);
+        byte[] buffer = new byte[MaxErrorBodyBytes];
+        int total = 0;
 
-        await base.TransformResponseAsync(context, response, cancellationToken);
-
-        if (failureClass == UpstreamFailureClass.ExplicitFailure && ForwardingSignals.IsRequestBodyReplayable(context))
+        while (total < buffer.Length)
         {
-            context.Response.Clear();
-            ForwardingSignals.SetSwitchNext(context, new UpstreamSwitchReason((int)response.StatusCode, errorCode));
-            return false;
+            int read = await source.ReadAsync(buffer.AsMemory(total), cancellationToken);
+            if (read == 0)
+            {
+                return (buffer[..total], true, UpstreamErrorClassifier.TryReadErrorCode(buffer.AsSpan(0, total)));
+            }
+
+            total += read;
         }
 
-        await WriteBackErrorBodyAsync(context, errorBody, cancellationToken);
-        return false;
+        return (buffer, false, null);
     }
 
-    private static ValueTask<(ReadOnlyMemory<byte> Body, string? ErrorCode)> ReadErrorBodyAsync(
-        HttpResponseMessage response,
-        CancellationToken cancellationToken)
-        => throw new NotImplementedException(); // TODO：有界读取错误体，并用 UpstreamErrorClassifier.TryReadErrorCode 提取 code
-
-    private static ValueTask WriteBackErrorBodyAsync(
+    private static async ValueTask WriteBodyAsync(
         HttpContext context,
-        ReadOnlyMemory<byte> errorBody,
+        Stream source,
+        byte[] prefix,
+        bool complete,
         CancellationToken cancellationToken)
-        => throw new NotImplementedException(); // TODO：把已读字节原样写入响应体（状态码与响应头已由基类复制）
+    {
+        if (prefix.Length > 0)
+        {
+            await context.Response.Body.WriteAsync(prefix.AsMemory(0, prefix.Length), cancellationToken);
+        }
+
+        if (!complete)
+        {
+            await source.CopyToAsync(context.Response.Body, cancellationToken);
+        }
+    }
 
     private static void ApplyFixedUserAgent(HttpRequestMessage request, string userAgent)
-        => throw new NotImplementedException(); // TODO：清除后 TryAddWithoutValidation
+    {
+        request.Headers.Remove("User-Agent");
+        request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+    }
 
     private static void ApplyUpstreamAuthorization(HttpRequestMessage request, string apiKey)
-        => throw new NotImplementedException(); // TODO：丢弃客户端凭据，写入所选上游密钥
+        => request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
     private static void ClearInboundHostHeader(HttpRequestMessage request)
-        => throw new NotImplementedException(); // TODO：置 null，由目标 URI 决定 Host
+        => request.Headers.Host = null;
 }
