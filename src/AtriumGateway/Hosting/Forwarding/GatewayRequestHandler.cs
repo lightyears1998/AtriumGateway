@@ -26,6 +26,7 @@ public enum ForwardAttemptResult
 public sealed class GatewayRequestHandler
 {
     private const string BearerPrefix = "Bearer ";
+    private const int MaxUpstreamAttempts = 3;
 
     private readonly IHttpForwarder _forwarder;
     private readonly IAccountAuthenticator _authenticator;
@@ -89,23 +90,32 @@ public sealed class GatewayRequestHandler
         List<string> attemptedUpstreams = new();
         List<UpstreamSwitchReason> switchReasons = new();
 
-        while (true)
+        // 单次请求至多尝试 MaxUpstreamAttempts 个上游：明确错误立即置冷却，冷却中的上游不会被再次选中；
+        // 上游全部冷却或达到尝试上限时退出循环，向客户端返回 503。
+        for (int attemptIndex = 0; attemptIndex < MaxUpstreamAttempts; attemptIndex++)
         {
-            UpstreamEndpoint? upstream = _upstreamSelector.SelectNext(attemptedUpstreams);
-            if (upstream is null)
+            UpstreamLease? lease = _upstreamSelector.Acquire();
+            if (lease is null)
             {
                 break;
             }
 
-            attemptedUpstreams.Add(upstream.Id);
-            bodyBuffer.Rewind();
-
-            ForwardAttemptResult attempt = await ForwardOnceAsync(
-                context, upstream, account, attemptedUpstreams, switchReasons, startedAt);
-
-            if (attempt != ForwardAttemptResult.SwitchNext)
+            using (lease)
             {
-                return;
+                attemptedUpstreams.Add(lease.Upstream.Id);
+                bodyBuffer.Rewind();
+
+                ForwardAttemptResult attempt = await ForwardOnceAsync(
+                    context, lease.Upstream, account, attemptedUpstreams, switchReasons, startedAt);
+
+                lease.Report(attempt == ForwardAttemptResult.SwitchNext
+                    ? UpstreamOutcome.ExplicitFailure
+                    : UpstreamOutcome.PassThrough);
+
+                if (attempt != ForwardAttemptResult.SwitchNext)
+                {
+                    return;
+                }
             }
         }
 
@@ -144,7 +154,6 @@ public sealed class GatewayRequestHandler
 
         if (ForwardingSignals.TryConsumeSwitchNext(context, out UpstreamSwitchReason? reason))
         {
-            _upstreamSelector.Report(upstream, UpstreamOutcome.ExplicitFailure, DateTimeOffset.UtcNow);
             if (reason is not null)
             {
                 switchReasons.Add(reason);
@@ -153,7 +162,6 @@ public sealed class GatewayRequestHandler
             return ForwardAttemptResult.SwitchNext;
         }
 
-        _upstreamSelector.Report(upstream, UpstreamOutcome.PassThrough, DateTimeOffset.UtcNow);
         UsageSnapshot usage = observation.Complete();
         bool clientDisconnected = context.RequestAborted.IsCancellationRequested || IsClientCancellation(error);
         bool gatewayError = error != ForwarderError.None && !clientDisconnected;
