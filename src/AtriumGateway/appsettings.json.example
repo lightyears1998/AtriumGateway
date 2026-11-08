@@ -1,0 +1,21 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "Gateway": {
+    "Accounts": [
+      { "Id": "account-1", "Key": "<redacted>" }
+    ],
+    "Upstreams": [
+      { "Id": "upstream-1", "BaseAddress": "https://upstream1.invalid/", "ApiKey": "<redacted>" },
+      { "Id": "upstream-2", "BaseAddress": "https://upstream2.invalid/", "ApiKey": "<redacted>" }
+    ],
+    "UserAgent": "",
+    "UpstreamActivityTimeout": "00:10:00",
+    "UpstreamCooldown": "00:05:00",
+    "RequestBodyBufferLimit": 4194304
+  }
+}
