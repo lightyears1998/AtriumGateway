@@ -1,0 +1,21 @@
+# Local documents
+*.local.md
+
+# IDEs
+.dsh/
+.idea/
+
+# Configuration
+*.local.json
+.env
+.env.*
+!.env.example
+
+# dotnet
+bin/
+obj/
+.vs/
+TestResults/
+*.user
+*.suo
+*.userosscache
