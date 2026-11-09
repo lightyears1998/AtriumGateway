@@ -49,20 +49,22 @@ internal sealed class GatewayTransformer : HttpTransformer
             return await base.TransformResponseAsync(httpContext, proxyResponse, cancellationToken);
         }
 
-        Stream errorStream = await proxyResponse.Content.ReadAsStreamAsync(cancellationToken);
+        var statusCode = (int)proxyResponse.StatusCode;
+        var errorStream = await proxyResponse.Content.ReadAsStreamAsync(cancellationToken);
         try
         {
-            (byte[] prefix, bool complete, string? errorCode) = await ReadPrefixAsync(errorStream, cancellationToken);
-            UpstreamFailureClass failureClass = UpstreamErrorClassifier.Classify(
-                (int)proxyResponse.StatusCode,
-                complete ? errorCode : null);
+            (byte[] prefix, bool complete) = await ReadPrefixAsync(errorStream, cancellationToken);
+            UpstreamErrorSignals signals = complete
+                ? UpstreamErrorClassifier.ReadSignals(statusCode, prefix)
+                : new UpstreamErrorSignals(statusCode, null, null, null);
+            UpstreamFailureClass failureClass = UpstreamErrorClassifier.Classify(signals);
 
             await base.TransformResponseAsync(httpContext, proxyResponse, cancellationToken);
 
             if (failureClass == UpstreamFailureClass.ExplicitFailure && ForwardingSignals.IsRequestBodyReplayable(httpContext))
             {
                 httpContext.Response.Clear();
-                ForwardingSignals.SetSwitchNext(httpContext, new UpstreamSwitchReason((int)proxyResponse.StatusCode, errorCode));
+                ForwardingSignals.SetSwitchNext(httpContext, new UpstreamSwitchReason(statusCode, signals.ErrorCode));
                 return false;
             }
 
@@ -75,10 +77,17 @@ internal sealed class GatewayTransformer : HttpTransformer
         }
     }
 
+    /// <summary>只有可能构成明确错误的状态码才需要读取错误体。</summary>
     private static bool RequiresInspection(HttpResponseMessage response)
-        => (int)response.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status429TooManyRequests;
+        => (int)response.StatusCode is StatusCodes.Status401Unauthorized
+            or StatusCodes.Status403Forbidden
+            or StatusCodes.Status429TooManyRequests;
 
-    private static async ValueTask<(byte[] Prefix, bool Complete, string? ErrorCode)> ReadPrefixAsync(
+    /// <summary>
+    /// 有界读取错误体前缀。返回是否已读到流末尾：未读完时无法保证 JSON 完整，
+    /// 此时不据其内容判定（<see cref="UpstreamFailureClass.PassThrough"/>）。
+    /// </summary>
+    private static async ValueTask<(byte[] Prefix, bool Complete)> ReadPrefixAsync(
         Stream source,
         CancellationToken cancellationToken)
     {
@@ -90,13 +99,13 @@ internal sealed class GatewayTransformer : HttpTransformer
             int read = await source.ReadAsync(buffer.AsMemory(total), cancellationToken);
             if (read == 0)
             {
-                return (buffer[..total], true, UpstreamErrorClassifier.TryReadErrorCode(buffer.AsSpan(0, total)));
+                return (buffer[..total], true);
             }
 
             total += read;
         }
 
-        return (buffer, false, null);
+        return (buffer, false);
     }
 
     private static async ValueTask WriteBodyAsync(
