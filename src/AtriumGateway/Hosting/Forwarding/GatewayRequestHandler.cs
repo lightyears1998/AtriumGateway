@@ -7,7 +7,6 @@ using AtriumGateway.Core.Security;
 using AtriumGateway.Core.Upstream;
 using AtriumGateway.Hosting.Errors;
 using AtriumGateway.Hosting.Http;
-using Microsoft.AspNetCore.Http;
 using Yarp.ReverseProxy.Forwarder;
 
 namespace AtriumGateway.Hosting.Forwarding;
@@ -23,7 +22,7 @@ public enum ForwardAttemptResult
 }
 
 /// <summary>终端处理器：鉴权 → 请求体可重放缓冲 → 固定顺序换发循环 → 只读观测与元数据日志。</summary>
-public sealed class GatewayRequestHandler
+public sealed partial class GatewayRequestHandler
 {
     private const string BearerPrefix = "Bearer ";
     private const int MaxUpstreamAttempts = 3;
@@ -37,6 +36,7 @@ public sealed class GatewayRequestHandler
     private readonly IResponseObserverFactory _observerFactory;
     private readonly GatewayErrorWriter _errorWriter;
     private readonly IRequestLogSink _logSink;
+    private readonly ILogger<GatewayRequestHandler> _logger;
     private readonly string[] _secrets;
 
     public GatewayRequestHandler(
@@ -49,6 +49,7 @@ public sealed class GatewayRequestHandler
         IResponseObserverFactory observerFactory,
         GatewayErrorWriter errorWriter,
         IRequestLogSink logSink,
+        ILogger<GatewayRequestHandler> logger,
         GatewayOptions options)
     {
         _forwarder = forwarder;
@@ -60,6 +61,7 @@ public sealed class GatewayRequestHandler
         _observerFactory = observerFactory;
         _errorWriter = errorWriter;
         _logSink = logSink;
+        _logger = logger;
         _secrets = CollectSecrets(options);
     }
 
@@ -157,6 +159,7 @@ public sealed class GatewayRequestHandler
             if (reason is not null)
             {
                 switchReasons.Add(reason);
+                LogUpstreamSwitch(_logger, reason.StatusCode, reason.ErrorCode, upstream.Id);
             }
 
             return ForwardAttemptResult.SwitchNext;
@@ -300,4 +303,14 @@ public sealed class GatewayRequestHandler
 
         return secrets.ToArray();
     }
+
+    [LoggerMessage(
+        EventId = 1001,
+        Level = LogLevel.Warning,
+        Message = "upstream switch requested: upstream={UpstreamId} status={StatusCode} errorCode={ErrorCode}")]
+    private static partial void LogUpstreamSwitch(
+        ILogger logger,
+        int statusCode,
+        string? errorCode,
+        string upstreamId);
 }
