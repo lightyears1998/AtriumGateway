@@ -283,10 +283,18 @@ internal static class UsagePayloadParser
         }
     }
 
+    /// <summary>
+    /// 读取 usage 对象。同时接受 Chat Completions 的
+    /// <c>prompt_tokens</c>/<c>completion_tokens</c> 与 Responses 的
+    /// <c>input_tokens</c>/<c>output_tokens</c>，两者语义等价。
+    /// 同一字段两种写法并存时以显式命名为准。
+    /// </summary>
     private static TokenUsage ReadUsage(ref Utf8JsonReader reader)
     {
         int? prompt = null;
         int? completion = null;
+        int? input = null;
+        int? output = null;
         int? total = null;
 
         while (reader.Read())
@@ -309,6 +317,14 @@ internal static class UsagePayloadParser
             {
                 completion = ReadInt32(ref reader);
             }
+            else if (reader.ValueTextEquals("input_tokens"u8))
+            {
+                input = ReadInt32(ref reader);
+            }
+            else if (reader.ValueTextEquals("output_tokens"u8))
+            {
+                output = ReadInt32(ref reader);
+            }
             else if (reader.ValueTextEquals("total_tokens"u8))
             {
                 total = ReadInt32(ref reader);
@@ -319,7 +335,7 @@ internal static class UsagePayloadParser
             }
         }
 
-        return new TokenUsage(prompt, completion, total);
+        return new TokenUsage(prompt ?? input, completion ?? output, total);
     }
 
     private static int? ReadInt32(ref Utf8JsonReader reader)
